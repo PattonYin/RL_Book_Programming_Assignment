@@ -41,10 +41,12 @@ class JackCarRentalEnv:
         if action > 0: 
             if state[0] - action < 0:
                 action = state[0]
-        else if action < 0:
+        elif action < 0:
             if state[1] + action < 0:
                 action = -state[1]
-
+        else:
+            action = 0
+            
         return action
         
     def constrain_return(self, state):
@@ -105,6 +107,11 @@ class JackCarRentalEnv:
         # Implementation question, do I need to consider the return time for each individual car? Answer: No, the Poisson distribution of cars in and out took care of it.
         # However, in this case, doesn't it mean that the car rental doesn't affect the rewards? Since the return probability is deterministic and doesn't depend on the state. 
         # Nevermind, I just realized that the reward are dependent on the car rental request, which does depend on the state.
+        
+    def run_policy(self, state):
+        for action in self.actions:
+            pass
+        return 
         
     def policy_evaluation(self):
         threshold = 0.1
