@@ -1,6 +1,8 @@
 import numpy as np
 from scipy.stats import poisson
 from collections import defaultdict
+import random
+from tqdm import tqdm
 
 # Constants
 MAX_CARS = 20
@@ -21,7 +23,7 @@ def num_cars_requested():
 class JackCarRentalEnv:
     def __init__(self):
         self.states = [(i, j) for i in range(MAX_CARS + 1) for j in range(MAX_CARS + 1)]
-        self.actions = list(range(-max_move, max_move + 1)) # action > 0 means move from first location to second location and vice versa
+        self.actions = list(range(-MAX_MOVE, MAX_MOVE + 1)) # action > 0 means move from first location to second location and vice versa
 
         self.state_values = defaultdict(float)
         self.initialize_state_values()
@@ -34,8 +36,10 @@ class JackCarRentalEnv:
             self.state_values[state] = 0
 
     def initialize_policy(self):
+        # TODO: Why this random initialization helps?
         for state in self.states:
-            self.policy[state] = 0
+            self.policy[state] = random.randint(-MAX_MOVE, MAX_MOVE)
+        
 
     def constrain_move(self, state, action):
         if action > 0: 
@@ -63,71 +67,155 @@ class JackCarRentalEnv:
             cars_requested = (cars_requested[0], state[1])
         return cars_requested
     
-    def compute_transition_prob(self, cars_returned, cars_requested):
-        prob_1_return = poisson.pmf(cars_returned[0], mu=RETURNS_FIRST_LOC)
-        prob_2_return = poisson.pmf(cars_returned[1], mu=RETURNS_SECOND_LOC)
-        prob_1_request = poisson.pmf(cars_requested[0], mu=RENTAL_REQUEST_FIRST_LOC)
-        prob_2_request = poisson.pmf(cars_requested[1], mu=RENTAL_REQUEST_SECOND_LOC)
-        
-        return prob_1_return * prob_2_return * prob_1_request * prob_2_request
-
     def compute_reward(self, actual_cars_moved, actual_cars_requested):
-        return RENTAL_REWARD * actual_cars_requested[0] + RENTAL_REWARD * actual_cars_requested[1] - MOVE_COST * actual_cars_moved
-
-    def transition_prob_and_reward(self, state, action):
-        """ compute the transition probability and reward
-        Input: 
-            state: (n_car_1, n_car_2)
-            action: (n_move, target_loc)
-        Output:
-            next_state
-            transition_prob
-            reward
-        """
-        cars_returned = np.random.poisson(RETURNS_FIRST_LOC), np.random.poisson(RETURNS_SECOND_LOC)
-        cars_requested = np.random.poisson(RENTAL_REQUEST_FIRST_LOC), np.random.poisson(RENTAL_REQUEST_SECOND_LOC)   
+        cost = MOVE_COST * abs(actual_cars_moved)
+        revenue = RENTAL_REWARD * actual_cars_requested[0] + RENTAL_REWARD * actual_cars_requested[1]
+        return revenue - cost
         
-        # after action
-        actual_action = self.constrain_move(state, action)
-        next_state_1 = (state[0] + actual_action, state[1] - actual_action)
+    def request_prob(self, state, cars_requested):
+        if cars_requested[0] == state[0]:
+            prob_1 = 1 - poisson.cdf(cars_requested[0], mu=RENTAL_REQUEST_FIRST_LOC)
+        else:
+            prob_1 = poisson.pmf(cars_requested[0], mu=RENTAL_REQUEST_FIRST_LOC)
         
-        # after return
-        next_state_2 = (next_state_1[0] + cars_returned[0], next_state_1[1] + cars_returned[1])
-        next_state_2 = self.constrain_return(next_state_2)
+        if cars_requested[1] == state[1]:
+            prob_2 = 1 - poisson.cdf(cars_requested[1], mu=RENTAL_REQUEST_SECOND_LOC)
+        else:
+            prob_2 = poisson.pmf(cars_requested[1], mu=RENTAL_REQUEST_SECOND_LOC)
         
-        # after request
-        actual_cars_requested = self.constrain_rental(next_state_2, cars_requested)       
-        next_state_3 = (next_state_2[0] - actual_cars_requested[0], next_state_2[1] - actual_cars_requested[1])
-
-        transition_prob = self.compute_transition_prob(cars_returned, cars_requested)
-        reward = self.compute_reward(actual_action, actual_cars_requested)
-
-        return next_state_3, transition_prob, reward
-            
-        # Implementation question, do I need to consider the return time for each individual car? Answer: No, the Poisson distribution of cars in and out took care of it.
-        # However, in this case, doesn't it mean that the car rental doesn't affect the rewards? Since the return probability is deterministic and doesn't depend on the state. 
-        # Nevermind, I just realized that the reward are dependent on the car rental request, which does depend on the state.
+        return prob_1 * prob_2
+    
+    def return_prob(self, state, cars_returned):
+        if cars_returned[0] + state[0] == MAX_CARS:
+            prob_1 = 1 - poisson.cdf(cars_returned[0], mu=RETURNS_FIRST_LOC)
+        else:
+            prob_1 = poisson.pmf(cars_returned[0], mu=RETURNS_FIRST_LOC)
         
+        if cars_returned[1] + state[1] == MAX_CARS:
+            prob_2 = 1 - poisson.cdf(cars_returned[1], mu=RETURNS_SECOND_LOC)
+        else:
+            prob_2 = poisson.pmf(cars_returned[1], mu=RETURNS_SECOND_LOC)
+        
+        return prob_1 * prob_2
+    
     def run_policy(self, state):
-        for action in self.actions:
-            pass
-        return 
+        return self.policy[state]
         
     def policy_evaluation(self):
         threshold = 0.1
-        delta = 100
-        new_state_values = defaultdict(float)
-        while delta > threshold:
-            for state in self.states:
-                new_state_values[state] = self.state_values[state] + DISCOUNT * sum(self.transition_prob_and_reward(state, self.policy[state])[1] * self.state_values[self.transition_prob_and_reward(state, self.policy[state])[0]])
+        delta = float('inf')
+        
+        while delta >= threshold:
+            delta = 0
+            new_state_values = defaultdict(float)
+            for state in tqdm(self.states):
+                action = self.run_policy(state)
+                
+                v_val = 0
+                
+                # step 1: Move cars
+                # state input: state before action
+                # state output: state after action (dimension unchanged)
+                actual_action = self.constrain_move(state, action)
+                state_1 = (state[0] + actual_action, state[1] - actual_action)
 
-    # How am I supposed to compute the state transition probability? 
-    # How about this, for all actions, I compute a probability for each action on each state, and aggregate them together using average? Because the next state definitely depends on the action / policy, it is impossible to skip that.
-    #  
-        return
+                # step 2: Request cars
+                # state input: state after action
+                # state output: states before return (dimension expanded)
+                state_2s = []
+                for loc_1_num in range(state_1[0] + 1):
+                    for loc_2_num in range(state_1[1] + 1):
+                        state_2 = (state_1[0] - loc_1_num, state_1[1] - loc_2_num)
+                        reward = self.compute_reward(actual_action, (loc_1_num, loc_2_num))
+                        # compute the transition prob of request
+                        prob_2 = self.request_prob(state_1, (loc_1_num, loc_2_num))
+                        state_2s.append((state_2, (loc_1_num, loc_2_num), reward, prob_2))
+                
+                # step 3: Return cars
+                # state input: state after request
+                # state output: states after return (dimension expanded further)
+                for state_2, cars_requested, reward, prob_2 in state_2s:
+                    state_3s = []
+                    max_ret1 = MAX_CARS - state_2[0]
+                    max_ret2 = MAX_CARS - state_2[1]
+                    for loc_1_num in range(0, max_ret1 + 1):
+                        for loc_2_num in range(0, max_ret2 + 1):
+                            state_3 = (state_2[0] + loc_1_num, state_2[1] + loc_2_num)
+                            prob_3 = self.return_prob(state_2, (loc_1_num, loc_2_num))
+                            v_val += prob_2 * prob_3 * (reward + DISCOUNT * self.state_values[state_3])
+                
+                new_state_values[state] = v_val
+                delta = max(delta, abs(new_state_values[state] - self.state_values[state]))
+            
+            self.state_values = new_state_values
+            print("delta: ", delta)
+                    
+        return new_state_values
+        
 
     def policy_improvement(self):
-        return
+        policy_stable = True
+        for state in self.states:
+            old_action = self.policy[state]
+            q_vals = defaultdict(float)
+            for action in self.actions:
+                q_val = 0
+                
+                # step 1: Move cars
+                # state input: state before action
+                # state output: state after action (dimension unchanged)
+                actual_action = self.constrain_move(state, action)
+                state_1 = (state[0] + actual_action, state[1] - actual_action)
+
+                # step 2: Request cars
+                # state input: state after action
+                # state output: states before return (dimension expanded)
+                state_2s = []
+                for loc_1_num in range(state_1[0] + 1):
+                    for loc_2_num in range(state_1[1] + 1):
+                        state_2 = (state_1[0] - loc_1_num, state_1[1] - loc_2_num)
+                        reward = self.compute_reward(actual_action, (loc_1_num, loc_2_num))
+                        # compute the transition prob of request
+                        prob_2 = self.request_prob(state_1, (loc_1_num, loc_2_num))
+                        state_2s.append((state_2, (loc_1_num, loc_2_num), reward, prob_2))
+                
+                # step 3: Return cars
+                # state input: state after request
+                # state output: states after return (dimension expanded further)
+                for state_2, cars_requested, reward, prob_2 in state_2s:
+                    state_3s = []
+                    max_ret1 = MAX_CARS - state_2[0]
+                    max_ret2 = MAX_CARS - state_2[1]
+                    for loc_1_num in range(0, max_ret1 + 1):
+                        for loc_2_num in range(0, max_ret2 + 1):
+                            state_3 = (state_2[0] + loc_1_num, state_2[1] + loc_2_num)
+                            prob_3 = self.return_prob(state_2, (loc_1_num, loc_2_num))
+                            q_val += prob_2 * prob_3 * (reward + DISCOUNT * self.state_values[state_3])
+
+                q_vals[action] = q_val
+                
+            best_action = max(q_vals, key=q_vals.get)
+            if best_action != old_action and q_vals[best_action] > q_vals[old_action]:
+                self.policy[state] = best_action
+                policy_stable = False
             
-        
-        
+        return policy_stable
+    
+    def policy_iteration(self):
+        iteration = 1
+        while True:
+            print(f"Iteration {iteration}")
+            self.policy_evaluation()
+            policy_stable = self.policy_improvement()
+            if policy_stable:
+                break
+            iteration += 1
+            
+                
+        return self.policy, self.state_values
+
+if __name__ == "__main__":
+    env = JackCarRentalEnv()
+    policy, state_values = env.policy_iteration()
+    print(policy)
+    print(state_values)
